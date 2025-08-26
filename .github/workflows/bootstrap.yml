@@ -5,43 +5,21 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  bootstrap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate project files
+      - name: Create project files
         shell: bash
         run: |
           set -e
           mkdir -p .github/workflows src/sources src/notify data
 
-          # =================== Root files ===================
+          # Root files
           cat > README.md <<'EOF'
 # AI Market Agent (Nightly, 10 PM IST)
-
-This repo fetches Indian markets news from Google News RSS (for Moneycontrol, ET Markets, Mint, Business Standard, NSE), clusters similar stories, maps them to companies, scores sentiment, and emails a nightly report.
-
-### How it works
-1. Fetch headlines from Google News RSS (~36h).
-2. Normalize + store in SQLite.
-3. Cluster near-duplicates.
-4. Map to companies (from `data/companies_master.csv`).
-5. Score sentiment (positive/negative).
-6. Email you **Top 5 positive** + **Top 5 negative** stocks.
-
-### Setup
-1. Get a Gmail **App Password** (16 characters).
-2. Add GitHub repo **Secrets**:
-   - `SMTP_USER` = your Gmail
-   - `SMTP_PASS` = your Gmail App Password
-   - `EMAIL_TO`  = where to receive reports
-3. Done — workflow runs daily at **10 PM IST**.
-
-### Optional
-- Add Telegram bot secrets for instant notifications.
-- Edit `src/config.py` to change sources.
-- Add more companies in `data/companies_master.csv`.
+This repo fetches Indian markets news from Google News RSS (Moneycontrol, ET Markets, Mint, Business Standard, NSE), clusters similar stories, maps them to companies, scores sentiment, and emails a nightly report.
 EOF
 
           cat > requirements.txt <<'EOF'
@@ -56,24 +34,19 @@ python-dotenv
 EOF
 
           cat > .env.example <<'EOF'
-# Email (required)
 SMTP_USER=you@gmail.com
 SMTP_PASS=your_16_char_app_password
 EMAIL_TO=you@gmail.com
-
-# Telegram (optional)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 EOF
 
           cat > .github/workflows/daily.yml <<'EOF'
 name: nightly-report
-
 on:
   schedule:
-    - cron: "30 16 * * *"   # 10:00 PM IST (UTC+5:30)
+    - cron: "30 16 * * *"
   workflow_dispatch: {}
-
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -82,10 +55,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install deps
-        run: pip install -r requirements.txt
-      - name: Run job
-        env:
+      - run: pip install -r requirements.txt
+      - env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
@@ -94,19 +65,12 @@ jobs:
         run: python -m src.job_daily
 EOF
 
-          # =================== src/ ===================
-          cat > src/__init__.py <<'EOF'
-# empty
-EOF
-
+          # src/
+          printf "" > src/__init__.py
           cat > src/config.py <<'EOF'
 from zoneinfo import ZoneInfo
 import os
-
-# Timezone
 IST = ZoneInfo("Asia/Kolkata")
-
-# Domains to fetch via Google News RSS
 NEWS_DOMAINS = [
     "moneycontrol.com",
     "economictimes.indiatimes.com",
@@ -114,24 +78,16 @@ NEWS_DOMAINS = [
     "business-standard.com",
     "nseindia.com",
 ]
-
 LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "36"))
-
-# Email
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 EMAIL_TO  = os.getenv("EMAIL_TO", "")
-
-# Telegram
-ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "false").lower() in {"1", "true", "yes"}
+ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "false").lower() in {"1","true","yes"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
 DB_PATH = os.getenv("DB_PATH", "ai_agent.db")
-
-# Scoring weights
 WEIGHT_BY_DOMAIN = {
     "nseindia.com": 1.5,
     "business-standard.com": 1.2,
@@ -145,16 +101,13 @@ EOF
           cat > src/db.py <<'EOF'
 import sqlite3
 from typing import Iterable, Dict, Any
-
 def get_conn(db_path: str):
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
-
 def init_db(conn: sqlite3.Connection):
-    conn.executescript(
-        '''
+    conn.executescript('''
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT,
@@ -164,22 +117,19 @@ def init_db(conn: sqlite3.Connection):
             summary TEXT,
             raw_text TEXT
         );
-        '''
-    )
+    ''')
     conn.commit()
-
 def insert_articles(conn, rows: Iterable[Dict[str, Any]]):
     cur = conn.cursor()
     for r in rows:
         try:
             cur.execute(
                 "INSERT OR IGNORE INTO articles (source, url, title, published_at, summary, raw_text) VALUES (?, ?, ?, ?, ?, ?)",
-                (r["source"], r["url"], r["title"], r["published_at"], r.get("summary", ""), r.get("raw_text", "")),
+                (r["source"], r["url"], r["title"], r["published_at"], r.get("summary",""), r.get("raw_text","")),
             )
         except:
             pass
     conn.commit()
-
 def fetch_recent_articles(conn, since_iso: str):
     cur = conn.cursor()
     cur.execute("SELECT id, source, url, title, published_at, summary, raw_text FROM articles WHERE published_at >= ? ORDER BY published_at DESC", (since_iso,))
@@ -190,37 +140,29 @@ EOF
           cat > src/normalize.py <<'EOF'
 import re
 from typing import Optional
-
 def clean_text(s: Optional[str]) -> str:
-    if not s:
-        return ""
-    s = re.sub(r'<[^>]+>', ' ', s)  # strip HTML
-    s = s.replace('\xa0', ' ')
-    s = re.sub(r'\s+', ' ', s).strip()
+    if not s: return ""
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = s.replace('\xa0',' ')
+    s = re.sub(r'\s+',' ', s).strip()
     return s[:4000]
 EOF
 
           cat > src/dedupe.py <<'EOF'
 from typing import List, Dict, Any
 from rapidfuzz import fuzz
-
 def cluster_articles(articles: List[Dict[str, Any]], title_threshold: int = 88) -> List[List[Dict[str, Any]]]:
     clusters: List[List[Dict[str, Any]]] = []
     used = [False] * len(articles)
-
     for i, a in enumerate(articles):
-        if used[i]: 
-            continue
-        group = [a]
-        used[i] = True
+        if used[i]: continue
+        group = [a]; used[i] = True
         for j in range(i+1, len(articles)):
-            if used[j]: 
-                continue
+            if used[j]: continue
             b = articles[j]
             tscore = fuzz.token_set_ratio(a.get("title",""), b.get("title",""))
             if tscore >= title_threshold:
-                group.append(b)
-                used[j] = True
+                group.append(b); used[j] = True
         clusters.append(group)
     return clusters
 EOF
@@ -228,30 +170,22 @@ EOF
           cat > src/entities.py <<'EOF'
 import csv, re
 from typing import List, Dict
-
 def load_companies(csv_path: str):
     companies = []
     with open(csv_path, newline='', encoding='utf-8') as f:
         r = csv.DictReader(f)
         for row in r:
             aliases = [a.strip() for a in (row.get("ALIASES") or "").split(";") if a.strip()]
-            companies.append({
-                "symbol": row["SYMBOL"].strip(),
-                "name": row["COMPANY_NAME"].strip(),
-                "aliases": aliases
-            })
+            companies.append({"symbol": row["SYMBOL"].strip(),"name": row["COMPANY_NAME"].strip(),"aliases": aliases})
     return companies
-
 def find_mentions(text: str, companies: List[Dict[str, str]]):
-    text_low = text.lower()
-    hits = []
+    text_low = text.lower(); hits = []
     for c in companies:
         names = [c["name"]] + c["aliases"]
         for nm in names:
             nm_low = nm.lower()
             if re.search(rf'\b{re.escape(nm_low)}\b', text_low):
-                hits.append(c["symbol"])
-                break
+                hits.append(c["symbol"]); break
     return list(sorted(set(hits)))
 EOF
 
@@ -259,51 +193,37 @@ EOF
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from collections import defaultdict
 from typing import List, Dict, Any, Tuple
-
 def compute_cluster_sentiment(cluster: List[Dict[str, Any]], weight_by_domain: Dict[str, float], default_weight: float):
-    analyzer = SentimentIntensityAnalyzer()
-    s, w = 0.0, 0.0
+    analyzer = SentimentIntensityAnalyzer(); s=w=0.0
     for a in cluster:
         txt = (a.get("title","") + " " + a.get("summary","")).strip()
         vs = analyzer.polarity_scores(txt)
         wd = weight_by_domain.get(a["source"], default_weight)
-        s += vs["compound"] * wd
-        w += wd
+        s += vs["compound"] * wd; w += wd
     return (s / w) if w else 0.0
-
 def aggregate_by_symbol(clusters_with_entities: List[Tuple[List[Dict[str, Any]], List[str]]], weight_by_domain: Dict[str, float], default_weight: float):
     pos, neg, reasons = defaultdict(float), defaultdict(float), defaultdict(list)
-
     for cluster, syms in clusters_with_entities:
         if not syms: continue
         sent = compute_cluster_sentiment(cluster, weight_by_domain, default_weight)
-        titles = [a["title"] for a in cluster[:2]]
-        reason = "; ".join(titles)[:220]
+        titles = [a["title"] for a in cluster[:2]]; reason = "; ".join(titles)[:220]
         for s in syms:
-            if sent >= 0:
-                pos[s] += sent
-            else:
-                neg[s] += -sent
+            (pos if sent>=0 else neg)[s] += abs(sent)
             reasons[s].append(reason)
-
     return pos, neg, reasons
-
 def top_n(d: Dict[str, float], n=5):
     return sorted(d.items(), key=lambda x: x[1], reverse=True)[:n]
 EOF
 
           cat > src/report.py <<'EOF'
 from typing import Dict, List
-
 def build_report_html(date_str: str, top_pos: List, top_neg: List, reasons: Dict[str, List[str]]):
     def block(title, items):
         html = f"<h2>{title}</h2><ol>"
         for sym, score in items:
             bullets = "".join(f"<li>{r}</li>" for r in reasons.get(sym, [])[:3])
             html += f"<li><strong>{sym}</strong> — {score:.2f}<ul>{bullets}</ul></li>"
-        html += "</ol>"
-        return html
-
+        html += "</ol>"; return html
     return f"""
     <html><body>
     <h1>Daily Market Impact — {date_str}</h1>
@@ -311,17 +231,14 @@ def build_report_html(date_str: str, top_pos: List, top_neg: List, reasons: Dict
     {block("Top 5 Negative", top_neg)}
     </body></html>
     """
-
 def build_report_text(date_str: str, top_pos: List, top_neg: List, reasons: Dict[str, List[str]]):
     def block(title, items):
-        out = [title]
+        out=[title]
         for sym, score in items:
             Rs = reasons.get(sym, [])[:3]
             out.append(f"- {sym} — {score:.2f}")
-            for r in Rs:
-                out.append(f"  • {r}")
+            for r in Rs: out.append(f"  • {r}")
         return "\n".join(out)
-
     txt = f"Daily Market Impact — {date_str}\n\n"
     txt += block("Top 5 Positive", top_pos) + "\n\n"
     txt += block("Top 5 Negative", top_neg) + "\n"
@@ -345,88 +262,55 @@ from .score import aggregate_by_symbol, top_n
 from .report import build_report_html, build_report_text
 from .notify.emailer import send_email
 from .notify.telegram import send_telegram
-
 def main():
-    # Current time in IST
     now_ist = datetime.now(IST)
     since_ist = now_ist - timedelta(hours=LOOKBACK_HOURS)
-
-    # Database connection
-    conn = db.get_conn(DB_PATH)
-    db.init_db(conn)
-
-    # 1. Ingest articles
+    conn = db.get_conn(DB_PATH); db.init_db(conn)
     all_articles = []
     for dom in NEWS_DOMAINS:
         try:
-            arts = fetch_for_domain(dom)
-            for a in arts:
+            for a in fetch_for_domain(dom):
                 a.summary = clean_text(a.summary)
                 all_articles.append({
-                    "source": a.source,
-                    "url": a.url,
-                    "title": a.title,
+                    "source": a.source, "url": a.url, "title": a.title,
                     "published_at": a.published_at.isoformat(timespec="seconds"),
-                    "summary": a.summary,
-                    "raw_text": a.raw_text or ""
+                    "summary": a.summary, "raw_text": a.raw_text or ""
                 })
-        except Exception:
-            continue
+        except Exception: continue
     db.insert_articles(conn, all_articles)
-
-    # 2. Fetch only recent ones
     recent = db.fetch_recent_articles(conn, since_ist.isoformat(timespec="seconds"))
-    if not recent:
-        print("No recent articles found.")
-        return
-
-    # 3. Cluster near-duplicates
+    if not recent: print("No recent articles found."); return
     clusters = cluster_articles(recent, title_threshold=88)
-
-    # 4. Map clusters to companies
     companies = load_companies("data/companies_master.csv")
-    clusters_with_entities = []
+    clusters_with_entities=[]
     for cl in clusters:
         bag = " ".join([(c.get("title","") + " " + c.get("summary","")) for c in cl])
         syms = find_mentions(bag, companies)
         clusters_with_entities.append((cl, syms))
-
-    # 5. Compute sentiment scores
     pos, neg, reasons = aggregate_by_symbol(clusters_with_entities, WEIGHT_BY_DOMAIN, DEFAULT_DOMAIN_WEIGHT)
-    top_pos = top_n(pos, 5)
-    top_neg = top_n(neg, 5)
-
-    # 6. Build report
+    top_pos = top_n(pos, 5); top_neg = top_n(neg, 5)
     date_str = now_ist.strftime("%Y-%m-%d %H:%M IST")
     html = build_report_html(date_str, top_pos, top_neg, reasons)
     txt  = build_report_text(date_str, top_pos, top_neg, reasons)
-
-    # 7. Send notifications
     subject = f"Daily Market Impact — {date_str}"
     if SMTP_USER and SMTP_PASS and EMAIL_TO:
         send_email(SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_TO, subject, html, txt)
-        print("✅ Email sent.")
+        print("Email sent.")
     else:
-        print("⚠️ Email not configured. Check SMTP_USER, SMTP_PASS, EMAIL_TO secrets.")
-
+        print("Email not configured (set SMTP_USER, SMTP_PASS, EMAIL_TO).")
     if ENABLE_TELEGRAM and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         send_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, txt[:4000])
-        print("✅ Telegram sent.")
-
+        print("Telegram sent.")
 if __name__ == "__main__":
     main()
 EOF
 
-          # =================== src/sources/ ===================
-          cat > src/sources/__init__.py <<'EOF'
-# empty
-EOF
-
+          # sources/
+          printf "" > src/sources/__init__.py
           cat > src/sources/base.py <<'EOF'
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-
 @dataclass
 class Article:
     source: str
@@ -443,15 +327,11 @@ from typing import List
 from urllib.parse import quote_plus
 import feedparser
 from .base import Article
-
 def _feed_url_for_domain(domain: str) -> str:
-    # Google News RSS search for site:domain, last ~2 days
     query = f"site:{domain}"
     return f"https://news.google.com/rss/search?q={quote_plus(query)}+when:2d&hl=en-IN&gl=IN&ceid=IN:en"
-
 def fetch_for_domain(domain: str) -> List[Article]:
-    url = _feed_url_for_domain(domain)
-    feed = feedparser.parse(url)
+    feed = feedparser.parse(_feed_url_for_domain(domain))
     out: List[Article] = []
     for e in feed.entries:
         if hasattr(e, 'published_parsed') and e.published_parsed:
@@ -463,60 +343,38 @@ def fetch_for_domain(domain: str) -> List[Article]:
         title = getattr(e, "title", "(no title)")
         link = getattr(e, "link", "")
         summary = getattr(e, "summary", "") or ""
-        out.append(Article(
-            source=domain,
-            url=link,
-            title=title.strip(),
-            published_at=dt,
-            summary=summary,
-            raw_text=None
-        ))
+        out.append(Article(source=domain, url=link, title=title.strip(), published_at=dt, summary=summary, raw_text=None))
     return out
 EOF
 
-          # =================== src/notify/ ===================
-          cat > src/notify/__init__.py <<'EOF'
-# empty
-EOF
-
+          # notify/
+          printf "" > src/notify/__init__.py
           cat > src/notify/emailer.py <<'EOF'
 import smtplib, ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-
 def send_email(smtp_host, smtp_port, smtp_user, smtp_pass, to_addr, subject, html_body, text_body):
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = smtp_user
-    msg['To'] = to_addr
-
-    part1 = MIMEText(text_body, 'plain', 'utf-8')
-    part2 = MIMEText(html_body, 'html', 'utf-8')
-    msg.attach(part1)
-    msg.attach(part2)
-
-    context = ssl.create_default_context()
+    msg['Subject'] = subject; msg['From'] = smtp_user; msg['To'] = to_addr
+    msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+    ctx = ssl.create_default_context()
     with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls(context=context)
-        server.login(smtp_user, smtp_pass)
+        server.starttls(context=ctx); server.login(smtp_user, smtp_pass)
         server.sendmail(smtp_user, [to_addr], msg.as_string())
 EOF
 
           cat > src/notify/telegram.py <<'EOF'
 import requests
-
 def send_telegram(bot_token: str, chat_id: str, text: str):
-    if not bot_token or not chat_id:
-        return
+    if not bot_token or not chat_id: return
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     data = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, data=data, timeout=15)
-    except Exception:
-        pass
+    try: requests.post(url, data=data, timeout=15)
+    except Exception: pass
 EOF
 
-          # =================== data/ ===================
+          # data/
           cat > data/companies_master.csv <<'EOF'
 SYMBOL,COMPANY_NAME,ALIASES
 RELIANCE,Reliance Industries,"Reliance;RIL;Jio"
@@ -541,9 +399,12 @@ M&M,Mahindra & Mahindra,"Mahindra;M&M Ltd"
 BAJFINANCE,Bajaj Finance,"Bajaj Fin;Bajaj Finance Ltd"
 EOF
 
-      - name: Commit generated files
-        uses: EndBug/add-and-commit@v9
-        with:
-          message: "Bootstrap project files"
-          add: "."
-
+      - name: Commit and push files
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Bootstrap project files" || echo "Nothing to commit"
+          git push
